@@ -53,7 +53,7 @@ class CommonValidationTest extends PropSpec with PropertyChecks with Matchers wi
           blockchain.append(preconditionDiff, genesisBlock)
 
           val r = CommonValidation.checkFee(blockchain, settings, 1, transferTx)
-          r should produce("Scripted account requires")
+          r should produce("Transactions from scripted accounts require Waves as fee")
         }
     }
   }
@@ -85,7 +85,7 @@ class CommonValidationTest extends PropSpec with PropertyChecks with Matchers wi
           blockchain.append(preconditionDiff, genesisBlock)
 
           val r = CommonValidation.checkFee(blockchain, settings, 1, transferTx)
-          r should produce("Scripted accounts can accept transactions with Waves as fee only")
+          r should produce("Transactions from scripted accounts require Waves as fee")
         }
     }
   }
