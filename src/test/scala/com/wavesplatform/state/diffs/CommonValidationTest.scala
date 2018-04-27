@@ -8,14 +8,14 @@ import com.wavesplatform.state.EitherExt2
 import com.wavesplatform.{NoShrink, TransactionGen}
 import org.scalacheck.Gen
 import org.scalatest.prop.PropertyChecks
-import org.scalatest.{Matchers, PropSpec}
+import org.scalatest.{Assertion, Matchers, PropSpec}
 import scorex.account.AddressScheme
 import scorex.lagonaki.mocks.TestBlock
 import scorex.settings.TestFunctionalitySettings
 import scorex.transaction.assets.{IssueTransaction, SmartIssueTransaction, SponsorFeeTransaction, TransferTransaction}
 import scorex.transaction.smart.SetScriptTransaction
 import scorex.transaction.smart.script.v1.ScriptV1
-import scorex.transaction.{GenesisTransaction, Transaction}
+import scorex.transaction.{GenesisTransaction, Transaction, ValidationError}
 
 class CommonValidationTest extends PropSpec with PropertyChecks with Matchers with TransactionGen with WithState with NoShrink {
 
@@ -40,55 +40,90 @@ class CommonValidationTest extends PropSpec with PropertyChecks with Matchers wi
     }
   }
 
-  property("sponsored transactions should work with smart accounts") {
+  private def sponsoredTransactionsCheckFeeTest(feeInAssets: Boolean, feeAmount: Long)(f: Either[ValidationError, Unit] => Assertion): Unit = {
+    val settings = createSettings(BlockchainFeatures.FeeSponsorship -> 0)
+    val gen      = sponsorAndSetScriptGen(sponsorship = true, smartToken = false, smartAccount = false, feeInAssets, feeAmount)
+    forAll(gen) {
+      case (genesisBlock, transferTx) =>
+        withStateAndHistory(settings) { blockchain =>
+          val preconditionDiff = BlockDiffer.fromBlock(settings, blockchain, None, genesisBlock).explicitGet()
+          blockchain.append(preconditionDiff, genesisBlock)
+
+          f(CommonValidation.checkFee(blockchain, settings, 1, transferTx))
+        }
+    }
+  }
+
+  property("checkFee for sponsored transactions sunny") {
+    sponsoredTransactionsCheckFeeTest(feeInAssets = true, feeAmount = 10)(_ shouldBe 'right)
+  }
+
+  property("checkFee for sponsored transactions fails if the fee is not enough") {
+    sponsoredTransactionsCheckFeeTest(feeInAssets = true, feeAmount = 1)(_ should produce("does not exceed minimal value of"))
+  }
+
+  private def smartTokensCheckFeeTest(feeInAssets: Boolean, feeAmount: Long)(f: Either[ValidationError, Unit] => Assertion): Unit = {
+    val settings = createSettings(BlockchainFeatures.SmartAccounts -> 0)
+    val gen      = sponsorAndSetScriptGen(sponsorship = false, smartToken = true, smartAccount = false, feeInAssets, feeAmount)
+    forAll(gen) {
+      case (genesisBlock, transferTx) =>
+        withStateAndHistory(settings) { blockchain =>
+          val preconditionDiff = BlockDiffer.fromBlock(settings, blockchain, None, genesisBlock).explicitGet()
+          blockchain.append(preconditionDiff, genesisBlock)
+
+          f(CommonValidation.checkFee(blockchain, settings, 1, transferTx))
+        }
+    }
+  }
+
+  property("checkFee for smart tokens sunny") {
+    smartTokensCheckFeeTest(feeInAssets = false, feeAmount = 1)(_ shouldBe 'right)
+  }
+
+  property("checkFee for smart tokens fails if the fee is in tokens") {
+    smartTokensCheckFeeTest(feeInAssets = true, feeAmount = 1)(_ should produce("Transactions with smart tokens require Waves as fee"))
+  }
+
+  private def smartAccountCheckFeeTest(feeInAssets: Boolean, feeAmount: Long)(f: Either[ValidationError, Unit] => Assertion): Unit = {
+    val settings = createSettings(BlockchainFeatures.SmartAccounts -> 0)
+    val gen      = sponsorAndSetScriptGen(sponsorship = false, smartToken = false, smartAccount = true, feeInAssets, feeAmount)
+    forAll(gen) {
+      case (genesisBlock, transferTx) =>
+        withStateAndHistory(settings) { blockchain =>
+          val preconditionDiff = BlockDiffer.fromBlock(settings, blockchain, None, genesisBlock).explicitGet()
+          blockchain.append(preconditionDiff, genesisBlock)
+
+          f(CommonValidation.checkFee(blockchain, settings, 1, transferTx))
+        }
+    }
+  }
+
+  property("checkFee for smart accounts sunny") {
+    smartAccountCheckFeeTest(feeInAssets = false, feeAmount = 400000)(_ shouldBe 'right)
+  }
+
+  property("checkFee for smart accounts fails if the fee is in tokens") {
+    smartAccountCheckFeeTest(feeInAssets = true, feeAmount = 1)(_ should produce("Transactions from scripted accounts require Waves as fee"))
+  }
+
+  property("checkFee sponsored + smart tokens + smart accounts sunny") {
     val settings = createSettings(
       BlockchainFeatures.FeeSponsorship -> 0,
       BlockchainFeatures.SmartAccounts  -> 0
     )
-
-    forAll(sponsorAndSetScriptGen(sponsorship = true, smartToken = false, smartAccount = true)) {
+    val gen = sponsorAndSetScriptGen(sponsorship = true, smartToken = true, smartAccount = true, feeInAssets = true, 90)
+    forAll(gen) {
       case (genesisBlock, transferTx) =>
         withStateAndHistory(settings) { blockchain =>
           val preconditionDiff = BlockDiffer.fromBlock(settings, blockchain, None, genesisBlock).explicitGet()
           blockchain.append(preconditionDiff, genesisBlock)
 
-          val r = CommonValidation.checkFee(blockchain, settings, 1, transferTx)
-          r should produce("Transactions from scripted accounts require Waves as fee")
+          CommonValidation.checkFee(blockchain, settings, 1, transferTx) shouldBe 'right
         }
     }
   }
 
-  property("sponsored transactions should work without smart accounts") {
-    val settings = createSettings(BlockchainFeatures.FeeSponsorship -> 0)
-
-    forAll(sponsorAndSetScriptGen(sponsorship = true, smartToken = false, smartAccount = false)) {
-      case (genesisBlock, transferTx) =>
-        withStateAndHistory(settings) { blockchain =>
-          val preconditionDiff = BlockDiffer.fromBlock(settings, blockchain, None, genesisBlock).explicitGet()
-          blockchain.append(preconditionDiff, genesisBlock)
-
-          val r = CommonValidation.checkFee(blockchain, settings, 1, transferTx)
-          r shouldBe 'right
-        }
-    }
-  }
-
-  property("smart accounts should work without sponsored transactions") {
-    val settings = createSettings(BlockchainFeatures.SmartAccounts -> 0)
-
-    forAll(sponsorAndSetScriptGen(sponsorship = false, smartToken = false, smartAccount = true)) {
-      case (genesisBlock, transferTx) =>
-        withStateAndHistory(settings) { blockchain =>
-          val preconditionDiff = BlockDiffer.fromBlock(settings, blockchain, None, genesisBlock).explicitGet()
-          blockchain.append(preconditionDiff, genesisBlock)
-
-          val r = CommonValidation.checkFee(blockchain, settings, 1, transferTx)
-          r should produce("Transactions from scripted accounts require Waves as fee")
-        }
-    }
-  }
-
-  private def sponsorAndSetScriptGen(sponsorship: Boolean, smartToken: Boolean, smartAccount: Boolean) =
+  private def sponsorAndSetScriptGen(sponsorship: Boolean, smartToken: Boolean, smartAccount: Boolean, feeInAssets: Boolean, feeAmount: Long) =
     for {
       richAcc      <- accountGen
       recipientAcc <- accountGen
@@ -125,7 +160,7 @@ class CommonValidationTest extends PropSpec with PropertyChecks with Matchers wi
         .explicitGet()
 
       val transferAssetTx = TransferTransaction
-        .create(Some(issueTx.id()), richAcc, recipientAcc, 100, ts, None, 1 * Constants.UnitsInWave, Array.emptyByteArray)
+        .create(Some(issueTx.id()), richAcc, recipientAcc, 1000, ts, None, 1 * Constants.UnitsInWave, Array.emptyByteArray)
         .explicitGet()
 
       val sponsorTx =
@@ -152,20 +187,20 @@ class CommonValidationTest extends PropSpec with PropertyChecks with Matchers wi
           )
         else Seq.empty
 
-      val transferAssetsBackTx = TransferTransaction
+      val transferBackTx = TransferTransaction
         .create(
           Some(issueTx.id()),
           recipientAcc,
           richAcc,
           1,
           ts,
-          Some(issueTx.id()),
-          10,
+          if (feeInAssets) Some(issueTx.id()) else None,
+          feeAmount,
           Array.emptyByteArray
         )
         .explicitGet()
 
-      (TestBlock.create(Vector[Transaction](genesisTx, issueTx, transferWavesTx, transferAssetTx) ++ sponsorTx ++ setScriptTx), transferAssetsBackTx)
+      (TestBlock.create(Vector[Transaction](genesisTx, issueTx, transferWavesTx, transferAssetTx) ++ sponsorTx ++ setScriptTx), transferBackTx)
     }
 
   private def createSettings(preActivatedFeatures: (BlockchainFeature, Int)*): FunctionalitySettings =
